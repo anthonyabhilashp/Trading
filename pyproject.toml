@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kite-trading"
+version = "1.0.0"
+description = "Minimal wrapper around pykiteconnect with token persistence"
+requires-python = ">=3.10"
+dependencies = [
+    "kiteconnect>=5.0.0",
+    "pydantic-settings>=2.0.0",
+    "python-dotenv>=1.0.0",
+    "flask>=3.0.0",
+    "pytz>=2023.0",
+]
+
+[project.scripts]
+kite-auth = "scripts.generate_token:main"
+kite-server = "scripts.run_server:main"
+
+[tool.setuptools.packages.find]
+include = ["kite_wrapper*", "scripts*"]
