@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     kite_api_key: str
     kite_api_secret: str
     kite_redirect_url: str = "http://127.0.0.1:5000/callback"
-    kite_token_file: Path = Path.home() / ".kite_tokens.json"
+    kite_token_file: Path = Path(__file__).parent.parent / ".kite_tokens.json"
 
 
 _settings: Settings | None = None
