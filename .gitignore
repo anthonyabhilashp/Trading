@@ -1,7 +1,10 @@
 .env
 *.json
+*.jsonl
 !.env.example
 __pycache__/
 *.egg-info/
 dist/
+venv/
 .venv/
+server.log

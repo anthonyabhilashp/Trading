@@ -2,5 +2,6 @@
 
 from .client import KiteClient
 from .config import Settings, get_settings
+from .strategy import StrategyEngine
 
-__all__ = ["KiteClient", "Settings", "get_settings"]
+__all__ = ["KiteClient", "Settings", "get_settings", "StrategyEngine"]

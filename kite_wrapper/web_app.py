@@ -1,12 +1,28 @@
 """Flask web app for hosted Kite authentication."""
 
+import logging
+
 from flask import Flask, redirect, request, render_template_string
 from kiteconnect import KiteConnect
 
+from .client import KiteClient
 from .config import get_settings
+from .strategy import StrategyEngine
 from .token_manager import TokenManager
+from .dashboard import dashboard_bp, init_dashboard
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+)
 
 app = Flask(__name__)
+
+# Shared instances used by the strategy engine and dashboard
+_client = KiteClient()
+_engine = StrategyEngine(_client)
+init_dashboard(_engine)
+app.register_blueprint(dashboard_bp)
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -68,6 +84,9 @@ HTML_TEMPLATE = """
         </div>
         <a href="/login" class="btn">Login with Kite</a>
     {% endif %}
+    <div style="margin-top: 20px;">
+        <a href="/dashboard" class="btn" style="background: #28a745;">Trading Dashboard &rarr;</a>
+    </div>
 </body>
 </html>
 """
@@ -134,6 +153,9 @@ def callback():
 
         token_manager.save_token(access_token, user_id)
 
+        # Sync token with the shared client so the strategy engine can use it
+        _client.kite.set_access_token(access_token)
+
         return render_template_string(HTML_TEMPLATE, status="success", user_id=user_id)
 
     except Exception as e:
@@ -157,6 +179,12 @@ def status():
             pass
 
     return {"authenticated": False}
+
+
+# Auto-start the strategy engine if it was previously enabled and the client
+# has a valid token.  This covers server-restart scenarios.
+if _engine.state.settings.enabled and _client.is_authenticated:
+    _engine.start()
 
 
 def run_server(host: str = "0.0.0.0", port: int = 5000, debug: bool = False):
