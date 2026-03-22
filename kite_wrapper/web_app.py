@@ -12,12 +12,22 @@ from .config import get_settings
 from .strategy import StrategyEngine
 from .token_manager import TokenManager
 from .dashboard import dashboard_bp, init_dashboard
+from .backtest_dashboard import backtest_bp, init_backtest
 import kite_wrapper.strategies  # noqa: F401 — triggers @register_strategy decorators
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-)
+import pytz as _pytz
+import datetime as _dt
+
+class _ISTFormatter(logging.Formatter):
+    _ist = _pytz.timezone("Asia/Kolkata")
+    def formatTime(self, record, datefmt=None):
+        ct = _dt.datetime.fromtimestamp(record.created, self._ist)
+        return ct.strftime("%Y-%m-%d %H:%M:%S")
+
+_handler = logging.StreamHandler()
+_handler.setFormatter(_ISTFormatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s"))
+logging.basicConfig(level=logging.INFO, handlers=[_handler])
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 
 app = Flask(__name__)
@@ -26,7 +36,9 @@ app = Flask(__name__)
 _client = KiteClient()
 _engine = StrategyEngine(_client)
 init_dashboard(_engine)
+init_backtest(_client)
 app.register_blueprint(dashboard_bp)
+app.register_blueprint(backtest_bp)
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -190,7 +202,6 @@ def status():
 LOG_FILE = Path(__file__).parent.parent / "server.log"
 
 
-_DEBUG_PATHS = ("/api/dashboard", "/status", "/api/logs")
 
 
 @app.route("/api/logs")
@@ -205,13 +216,9 @@ def api_logs():
 
     try:
         with open(LOG_FILE, "r") as f:
-            # Read extra buffer when filtering to ensure enough lines after removal
-            buf = deque(f, maxlen=n * 5 if level != "debug" else n)
+            buf = deque(f, maxlen=n)
 
         lines = [line.rstrip("\n") for line in buf]
-
-        if level != "debug":
-            lines = [l for l in lines if not any(p in l for p in _DEBUG_PATHS)]
 
         return jsonify({"lines": lines[-n:]})
     except Exception as e:
@@ -219,10 +226,6 @@ def api_logs():
 
 
 
-# Auto-start the strategy engine if it was previously enabled and the client
-# has a valid token.  This covers server-restart scenarios.
-if _engine.state.settings.enabled and _client.is_authenticated:
-    _engine.start()
 
 
 def run_server(host: str = "0.0.0.0", port: int = 5000, debug: bool = False):

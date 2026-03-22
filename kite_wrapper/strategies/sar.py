@@ -12,11 +12,13 @@ from ..base_strategy import (
 class SARStrategy(BaseStrategy):
 
     def select_instrument(self, ctx: StrategyContext, strategy_data: dict) -> dict | None:
-        return select_nifty_option(ctx.client, ctx.settings, "CE")
+        return select_nifty_option(ctx.client, "CE", ctx.settings.min_premium,
+                                       ctx.settings.expiry_type)
 
-    def initial_direction(self, strategy_data: dict) -> str:
-        return "SELL"
+    def initial_direction(self, strategy_data: dict, bias: str) -> str:
+        # BULLISH → BUY CE (price goes up), BEARISH → SELL CE (price goes down)
+        return "BUY" if bias == "BULLISH" else "SELL"
 
     def on_sl_hit(self, ctx: StrategyContext, strategy_data: dict) -> dict:
         new_dir = "BUY" if ctx.current_direction == "SELL" else "SELL"
-        return {"action": "reverse", "direction": new_dir}
+        return {"action": "reselect_and_enter", "direction": new_dir}

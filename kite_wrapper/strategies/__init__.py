@@ -1,3 +1,3 @@
 """Import all strategy modules so their @register_strategy decorators fire."""
 
-from . import sar, buy_alternate, buy_scale_out
+from . import sar, buy_oneshot, buy_alternate_candle, buy_scale_out_candle, supertrend_candle

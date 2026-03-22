@@ -161,14 +161,39 @@ DASHBOARD_HTML = """
     margin-top: 10px;
   }
 
+  /* ── Signal Levels ── */
+  .signal-row {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px;
+    font-size: 12px; margin-top: 6px; padding-top: 6px;
+    border-top: 1px dashed #e0e0e0;
+  }
+  .signal-row .sig-label { color: #999; }
+  .signal-row .sig-value { font-weight: 600; text-align: right; }
+  .sig-up { color: #28a745; }
+  .sig-down { color: #dc3545; }
+  .sig-wait { color: #856404; }
+
+  /* ── P&L Chart ── */
+  .chart-card { padding: 16px 16px 12px; position: relative; }
+  .chart-card h3 { margin-bottom: 8px; }
+  #pnl-chart { width: 100%; height: 180px; display: block; cursor: crosshair; }
+  .chart-tooltip {
+    position: absolute; pointer-events: none; display: none;
+    background: rgba(26,26,46,0.9); color: #fff; padding: 6px 10px;
+    border-radius: 6px; font-size: 12px; white-space: nowrap;
+    line-height: 1.4; z-index: 10;
+  }
+
   /* ── Mobile ── */
   @media (max-width: 640px) {
     .container { padding: 12px; }
     .grid-2 { grid-template-columns: 1fr; }
     .settings-grid { grid-template-columns: 1fr 1fr; }
+    .strat-info .info-grid { grid-template-columns: 120px 1fr; }
     header h1 { font-size: 18px; }
     .pnl-value { font-size: 28px; }
     .pos-dir { font-size: 24px; }
+    #pnl-chart { height: 140px; }
   }
 </style>
 </head>
@@ -182,6 +207,7 @@ DASHBOARD_HTML = """
     <span id="symbol"></span>
     <span class="header-spacer"></span>
     <button class="btn btn-start" id="toggle-btn" onclick="toggleEngine()">Start Engine</button>
+    <a href="/backtest" class="auth-link" style="margin-right:4px">Backtest</a>
     <a href="/login" id="auth-link" class="auth-link">Login</a>
   </header>
   <div class="info-line">
@@ -201,6 +227,13 @@ DASHBOARD_HTML = """
       <h3>Active Position</h3>
       <div id="position"><div class="no-position">No active position</div></div>
     </div>
+  </div>
+
+  <!-- P&L Chart -->
+  <div class="card chart-card">
+    <h3>P&amp;L Today</h3>
+    <canvas id="pnl-chart"></canvas>
+    <div class="chart-tooltip" id="chart-tooltip"></div>
   </div>
 
   <!-- Server Logs — Collapsible -->
@@ -252,10 +285,6 @@ DASHBOARD_HTML = """
         <input type="number" id="s-tgt" value="10" step="0.5" min="1">
       </div>
       <div class="form-group">
-        <label>Target Premium</label>
-        <input type="number" id="s-premium" value="1000" step="50" min="100">
-      </div>
-      <div class="form-group">
         <label>Lots (<span id="s-qty-label">lot size: --</span>)</label>
         <input type="number" id="s-qty" value="0" min="1" step="1">
       </div>
@@ -265,6 +294,39 @@ DASHBOARD_HTML = """
           <option value="MIS">MIS (Intraday)</option>
           <option value="NRML">NRML (Overnight)</option>
         </select>
+      </div>
+      <div class="form-group">
+        <label>Market Bias</label>
+        <select id="s-bias">
+          <option value="BULLISH">Bullish</option>
+          <option value="BEARISH">Bearish</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Min Premium</label>
+        <input type="number" id="s-minprem" value="100" step="10" min="0">
+      </div>
+      <div class="form-group">
+        <label>Expiry Type</label>
+        <select id="s-expiry">
+          <option value="weekly">Weekly</option>
+          <option value="monthly">Monthly</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label style="display:flex;align-items:center;gap:5px;">
+          <input type="checkbox" id="s-cutoff"> Daily Cutoff
+        </label>
+      </div>
+      <div class="form-group">
+        <label>Profit %</label>
+        <input type="number" id="s-profit-pct" value="25" step="1" min="0">
+        <span id="s-profit-val" style="font-size:11px;color:#888;"></span>
+      </div>
+      <div class="form-group">
+        <label>Loss %</label>
+        <input type="number" id="s-loss-pct" value="25" step="1" min="0">
+        <span id="s-loss-val" style="font-size:11px;color:#888;"></span>
       </div>
     </div>
   </div>
@@ -290,7 +352,22 @@ DASHBOARD_HTML = """
 
 <script>
 let settingsLoaded = false;
-const STRATEGY_LABELS = {sar: 'Buy/Sell CE Alternate', buy_alternate: 'Buy CE/PE Alternate', buy_scale_out: 'Buy CE/PE Scale Out Alternate'};
+const STRATEGY_LABELS = {sar: 'Buy/Sell CE Alternate', buy_ce: 'Buy CE', buy_pe: 'Buy PE', buy_ce_pe_alternate_candle_close: 'Buy CE/PE Alternate (Candle Close)', buy_ce_pe_scale_out_candle_close: 'Buy CE/PE Scale Out (Candle Close)', supertrend_candle_close: 'Buy CE/PE Supertrend (Candle Close)'};
+
+var _dashLotSize = 0;
+function updateCutoffValues() {
+  var qty = parseInt(document.getElementById('s-qty').value, 10) || 1;
+  var prem = parseFloat(document.getElementById('s-minprem').value) || 100;
+  var notional = qty * _dashLotSize * prem;
+  var pp = parseFloat(document.getElementById('s-profit-pct').value) || 0;
+  var lp = parseFloat(document.getElementById('s-loss-pct').value) || 0;
+  document.getElementById('s-profit-val').textContent = _dashLotSize ? '= \\u20B9' + Math.round(notional * pp / 100) : '';
+  document.getElementById('s-loss-val').textContent = _dashLotSize ? '= \\u20B9' + Math.round(notional * lp / 100) : '';
+}
+document.getElementById('s-profit-pct').addEventListener('input', updateCutoffValues);
+document.getElementById('s-loss-pct').addEventListener('input', updateCutoffValues);
+document.getElementById('s-qty').addEventListener('input', updateCutoffValues);
+document.getElementById('s-minprem').addEventListener('input', updateCutoffValues);
 
 // Populate strategy dropdown on load
 fetch('/api/strategies')
@@ -332,13 +409,96 @@ function updateUI(d) {
   s.textContent = d.engine_status.replace('_', ' ');
   s.className = 'badge ' + d.engine_status.toLowerCase();
 
+  // Dual-position slots (signal-based strategies)
+  const slots = d.position_slots || {};
+  const hasSlots = Object.keys(slots).length > 0;
+
   // Symbol
-  document.getElementById('symbol').textContent = d.trading_symbol || '';
+  var symText = d.trading_symbol || '';
+  if (hasSlots && !symText) {
+    var symParts = [];
+    ['CE', 'PE'].forEach(function(opt) {
+      if (slots[opt] && slots[opt].trading_symbol) symParts.push(slots[opt].trading_symbol);
+    });
+    symText = symParts.join(' | ');
+  }
+  document.getElementById('symbol').textContent = symText;
 
   // Position
   const posEl = document.getElementById('position');
   const pos = d.active_position;
-  if (pos && pos.direction) {
+
+  if (hasSlots) {
+    // Dual-position display for signal-based strategies
+    var slotHtml = '';
+    var totalUnrealized = 0;
+    var sd = d.strategy_data || {};
+    var barLabel = '5min';
+    ['CE', 'PE'].forEach(function(opt) {
+      var slot = slots[opt];
+      if (!slot) return;
+      var sp = slot.active_position;
+      var slotLtp = slot.current_ltp || 0;
+
+      // Live signal levels from strategy_data
+      var stVal = sd['_st_value_' + opt];
+      var stClose = sd['_st_close_' + opt];
+      var stTrend = sd['_st_trend_' + opt];
+      var stReentry = sd['_st_reentry_' + opt];
+      var isWaiting = sd['_waiting_' + opt];
+      var inBuyTrend = sd['_in_buy_trend_' + opt];
+
+      if (sp && sp.direction) {
+        var sQty = (sp.remaining_lots && slot.lot_size) ? sp.remaining_lots * slot.lot_size : ((d.settings.quantity || 1) * (slot.lot_size || 1));
+        var sUnreal = (sp.direction === 'BUY') ? (slotLtp - sp.entry_price) * sQty : (sp.entry_price - slotLtp) * sQty;
+        totalUnrealized += sUnreal;
+        slotHtml +=
+          '<div style="margin-bottom:8px;padding:6px;background:#f8f9fa;border-radius:6px;">' +
+          '<div style="font-weight:700;font-size:14px;color:#28a745;">' + opt + ' ' + sp.direction + ' <span style="font-size:11px;color:#888;">' + (slot.trading_symbol || '') + '</span></div>' +
+          '<div class="pos-grid" style="font-size:13px;">' +
+            '<span class="label">Entry</span><span class="value">' + sp.entry_price.toFixed(2) + '</span>' +
+            '<span class="label">LTP</span><span class="value">' + slotLtp.toFixed(2) + '</span>' +
+            '<span class="label">SL</span><span class="value">' + sp.sl_price.toFixed(2) + '</span>' +
+            '<span class="label">Target</span><span class="value">' + sp.target_price.toFixed(2) + '</span>' +
+            '<span class="label">Lots</span><span class="value">' + (sp.remaining_lots || '-') + '</span>' +
+            '<span class="label">P&L</span><span class="value ' + (sUnreal >= 0 ? 'pnl-pos' : 'pnl-neg') + '">' + (sUnreal >= 0 ? '+' : '') + sUnreal.toFixed(2) + '</span>' +
+          '</div>';
+        // Show signal levels below active position
+        if (stVal != null) {
+          slotHtml += '<div class="signal-row">' +
+            '<span class="sig-label">Supertrend</span><span class="sig-value">' + stVal.toFixed(2) + '</span>' +
+            '<span class="sig-label">Trend</span><span class="sig-value ' + (stTrend === 'UP' ? 'sig-up' : 'sig-down') + '">' + (stTrend || '-') + '</span>' +
+          '</div>';
+        }
+        slotHtml += '</div>';
+      } else {
+        // No active position — show symbol + plain-text entry condition
+        var sym = slot.trading_symbol || '-';
+        var condText = '';
+
+        if (stVal != null) {
+          var price = stClose != null ? stClose.toFixed(2) : (slotLtp > 0 ? slotLtp.toFixed(2) : '-');
+          if (stTrend === 'DOWN') {
+            condText = 'Price: ' + price + '. Will enter if ' + barLabel + ' close crosses above ' + stVal.toFixed(2);
+          } else if (stReentry > 0 && stClose < stReentry) {
+            condText = 'Price: ' + price + '. Will enter if ' + barLabel + ' close crosses above ' + stReentry.toFixed(2);
+          } else {
+            condText = 'Price: ' + price + '. Entry signal pending';
+          }
+        } else {
+          condText = 'Waiting for supertrend data...';
+        }
+
+        slotHtml += '<div style="margin-bottom:8px;padding:8px;background:#f8f9fa;border-radius:6px;">' +
+          '<div style="font-weight:700;font-size:14px;color:#387ed1;">' + sym + ' <span style="font-size:12px;color:#888;">(' + opt + ')</span></div>' +
+          '<div style="font-size:13px;color:#555;margin-top:4px;">' + condText + '</div>' +
+          '</div>';
+      }
+    });
+    posEl.innerHTML = slotHtml || '<div class="no-position">Initializing...</div>';
+    document.getElementById('pnl-unrealized').textContent =
+      (totalUnrealized >= 0 ? '+' : '') + '\u20B9' + totalUnrealized.toFixed(2);
+  } else if (pos && pos.direction) {
     const dirClass = pos.direction.toLowerCase();
     const ltp = d.current_ltp || 0;
     const qty = (pos.remaining_lots && d.lot_size) ? pos.remaining_lots * d.lot_size : ((d.settings.quantity || 1) * (d.lot_size || 1));
@@ -373,7 +533,19 @@ function updateUI(d) {
     (realized >= 0 ? '+' : '') + '\u20B9' + realized.toFixed(2);
 
   let unrealizedVal = 0;
-  if (pos && pos.direction && d.current_ltp) {
+  if (hasSlots) {
+    ['CE', 'PE'].forEach(function(opt) {
+      var slot = slots[opt];
+      if (!slot) return;
+      var sp = slot.active_position;
+      var slotLtp = slot.current_ltp || 0;
+      if (sp && sp.direction && slotLtp) {
+        var sQty = (sp.remaining_lots && slot.lot_size) ? sp.remaining_lots * slot.lot_size : ((d.settings.quantity || 1) * (slot.lot_size || 1));
+        if (sp.direction === 'BUY') unrealizedVal += (slotLtp - sp.entry_price) * sQty;
+        else unrealizedVal += (sp.entry_price - slotLtp) * sQty;
+      }
+    });
+  } else if (pos && pos.direction && d.current_ltp) {
     const uQty = (pos.remaining_lots && d.lot_size) ? pos.remaining_lots * d.lot_size : ((d.settings.quantity || 1) * (d.lot_size || 1));
     if (pos.direction === 'SELL') unrealizedVal = (pos.entry_price - d.current_ltp) * uQty;
     else unrealizedVal = (d.current_ltp - pos.entry_price) * uQty;
@@ -389,23 +561,30 @@ function updateUI(d) {
     document.getElementById('s-stop').value = d.settings.stop_time || '15:15';
     document.getElementById('s-sl').value = d.settings.sl_points || 10;
     document.getElementById('s-tgt').value = d.settings.target_points || 10;
-    document.getElementById('s-premium').value = d.settings.target_premium || 1000;
     document.getElementById('s-qty').value = d.settings.quantity || 0;
     document.getElementById('s-product').value = d.settings.product || 'MIS';
+    document.getElementById('s-bias').value = d.settings.market_bias || 'AUTO';
+    document.getElementById('s-minprem').value = d.settings.min_premium || 100;
+    document.getElementById('s-expiry').value = d.settings.expiry_type || 'weekly';
+    document.getElementById('s-cutoff').checked = !!d.settings.daily_cutoff;
+    document.getElementById('s-profit-pct').value = d.settings.daily_profit_pct || 25;
+    document.getElementById('s-loss-pct').value = d.settings.daily_loss_pct || 25;
     document.getElementById('s-strategy').value = d.strategy_name || 'sar';
     settingsLoaded = true;
   }
 
-  // Strategy dropdown: disable while running, update title
+  // Strategy + bias dropdown: disable while running, update title
   var stratSel = document.getElementById('s-strategy');
   var running = d.engine_status !== 'STOPPED' && d.engine_status !== 'MARKET_CLOSED';
   stratSel.disabled = running;
+  document.getElementById('s-bias').disabled = running;
   var stratName = STRATEGY_LABELS[d.strategy_name] || d.strategy_name || 'SAR';
   document.getElementById('title').textContent = stratName;
 
   // Update lot size label and input constraints dynamically
   var lot = d.lot_size || 0;
-  var lotMult = (d.strategy_name === 'buy_scale_out') ? 3 : 1;
+  _dashLotSize = lot;
+  var lotMult = (d.strategy_name === 'buy_ce_pe_scale_out_candle_close') ? 3 : 1;
   var qtyInput = document.getElementById('s-qty');
   var qtyLabel = document.getElementById('s-qty-label');
   if (lot > 0) {
@@ -415,6 +594,7 @@ function updateUI(d) {
   } else {
     qtyLabel.textContent = 'lot size: --';
   }
+  updateCutoffValues();
 
   // Status message — only show when it adds info beyond the badge
   var msg = d.status_message || '';
@@ -464,6 +644,9 @@ function updateUI(d) {
     html += '</tbody></table>';
     tEl.innerHTML = html;
   }
+
+  // P&L chart
+  drawPnlChart(trades);
 }
 
 function showToast(msg, type) {
@@ -480,7 +663,7 @@ function saveSettings() {
   var saveBtn = document.getElementById('save-btn');
 
   // Enforce lots is valid multiple of lot_multiplier
-  var lotMult = (newStrategy === 'buy_scale_out') ? 3 : 1;
+  var lotMult = (newStrategy === 'buy_ce_pe_scale_out_candle_close') ? 3 : 1;
   var lots = parseInt(document.getElementById('s-qty').value, 10) || 0;
   if (lots > 0 && (lots < lotMult || lots % lotMult !== 0)) {
     var corrected = Math.max(Math.round(lots / lotMult), 1) * lotMult;
@@ -513,9 +696,14 @@ function saveSettings() {
       stop_time:  document.getElementById('s-stop').value,
       sl_points:  parseFloat(document.getElementById('s-sl').value),
       target_points: parseFloat(document.getElementById('s-tgt').value),
-      target_premium: parseFloat(document.getElementById('s-premium').value),
       quantity:   parseInt(document.getElementById('s-qty').value, 10),
       product:    document.getElementById('s-product').value,
+      market_bias: document.getElementById('s-bias').value,
+      min_premium: parseFloat(document.getElementById('s-minprem').value),
+      expiry_type: document.getElementById('s-expiry').value,
+      daily_cutoff: document.getElementById('s-cutoff').checked,
+      daily_profit_pct: parseFloat(document.getElementById('s-profit-pct').value) || 25,
+      daily_loss_pct: parseFloat(document.getElementById('s-loss-pct').value) || 25,
     };
     return fetch('/api/settings', {
       method: 'POST',
@@ -655,6 +843,197 @@ function loadHistory() {
     .catch(e => alert('Failed to load history: ' + e));
 }
 
+var _chartDots = []; // [{x, y, pnl, tradePnl, time, symbol}]
+
+function drawPnlChart(trades) {
+  var canvas = document.getElementById('pnl-chart');
+  var ctx = canvas.getContext('2d');
+  var dpr = window.devicePixelRatio || 1;
+  var rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
+  var W = rect.width, H = rect.height;
+
+  ctx.clearRect(0, 0, W, H);
+  _chartDots = [];
+
+  // Compute cumulative P&L points: start at 0, then after each trade
+  var points = [{time: '', pnl: 0, tradePnl: 0, symbol: ''}];
+  var cumPnl = 0;
+  if (trades && trades.length > 0) {
+    trades.forEach(function(t) {
+      cumPnl += (t.pnl || 0);
+      points.push({time: t.exit_time || '', pnl: cumPnl, tradePnl: t.pnl || 0, symbol: t.symbol || ''});
+    });
+  }
+
+  if (points.length < 2) {
+    ctx.fillStyle = '#aaa';
+    ctx.font = '13px -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('No trades yet', W / 2, H / 2);
+    return;
+  }
+
+  // Chart area with padding
+  var padL = 60, padR = 16, padT = 16, padB = 28;
+  var cW = W - padL - padR;
+  var cH = H - padT - padB;
+
+  var minP = 0, maxP = 0;
+  points.forEach(function(p) {
+    if (p.pnl < minP) minP = p.pnl;
+    if (p.pnl > maxP) maxP = p.pnl;
+  });
+  // Add 10% padding to Y range, ensure non-zero range
+  var range = maxP - minP;
+  if (range < 100) range = 100;
+  minP = minP - range * 0.1;
+  maxP = maxP + range * 0.1;
+  range = maxP - minP;
+
+  function xPos(i) { return padL + (i / (points.length - 1)) * cW; }
+  function yPos(v) { return padT + (1 - (v - minP) / range) * cH; }
+
+  // Background
+  ctx.fillStyle = '#fafbfc';
+  ctx.fillRect(padL, padT, cW, cH);
+
+  // Grid lines
+  ctx.strokeStyle = '#e8e8e8';
+  ctx.lineWidth = 0.5;
+  var gridLines = 4;
+  for (var g = 0; g <= gridLines; g++) {
+    var gVal = minP + (range * g / gridLines);
+    var gy = yPos(gVal);
+    ctx.beginPath(); ctx.moveTo(padL, gy); ctx.lineTo(W - padR, gy); ctx.stroke();
+    // Y labels
+    ctx.fillStyle = '#999';
+    ctx.font = '10px -apple-system, sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText((gVal >= 0 ? '+' : '') + Math.round(gVal).toLocaleString(), padL - 6, gy + 3);
+  }
+
+  // Zero line
+  if (minP < 0 && maxP > 0) {
+    var zy = yPos(0);
+    ctx.strokeStyle = '#ccc';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath(); ctx.moveTo(padL, zy); ctx.lineTo(W - padR, zy); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Fill area under/above zero
+  ctx.beginPath();
+  ctx.moveTo(xPos(0), yPos(0));
+  for (var i = 0; i < points.length; i++) {
+    ctx.lineTo(xPos(i), yPos(points[i].pnl));
+  }
+  ctx.lineTo(xPos(points.length - 1), yPos(0));
+  ctx.closePath();
+  var lastPnl = points[points.length - 1].pnl;
+  ctx.fillStyle = lastPnl >= 0 ? 'rgba(40,167,69,0.1)' : 'rgba(220,53,69,0.1)';
+  ctx.fill();
+
+  // Line
+  ctx.strokeStyle = lastPnl >= 0 ? '#28a745' : '#dc3545';
+  ctx.lineWidth = 2;
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  for (var i = 0; i < points.length; i++) {
+    var px = xPos(i), py = yPos(points[i].pnl);
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.stroke();
+
+  // Dots + store positions for hover
+  for (var i = 1; i < points.length; i++) {
+    var px = xPos(i), py = yPos(points[i].pnl);
+    ctx.beginPath();
+    ctx.arc(px, py, 3, 0, Math.PI * 2);
+    ctx.fillStyle = points[i].pnl >= 0 ? '#28a745' : '#dc3545';
+    ctx.fill();
+    _chartDots.push({x: px, y: py, pnl: points[i].pnl, tradePnl: points[i].tradePnl, time: points[i].time, symbol: points[i].symbol});
+  }
+
+  // X labels (show a few time labels)
+  ctx.fillStyle = '#999';
+  ctx.font = '10px -apple-system, sans-serif';
+  ctx.textAlign = 'center';
+  var step = Math.max(1, Math.floor(points.length / 6));
+  for (var i = 1; i < points.length; i += step) {
+    var label = points[i].time || '';
+    if (label.length > 5) label = label.substring(0, 5);
+    ctx.fillText(label, xPos(i), H - 6);
+  }
+  // Always show last label
+  if ((points.length - 1) % step !== 0 && points.length > 2) {
+    var ll = points[points.length - 1].time || '';
+    if (ll.length > 5) ll = ll.substring(0, 5);
+    ctx.fillText(ll, xPos(points.length - 1), H - 6);
+  }
+
+  // Current value label at end of line
+  var endX = xPos(points.length - 1), endY = yPos(lastPnl);
+  ctx.fillStyle = lastPnl >= 0 ? '#28a745' : '#dc3545';
+  ctx.font = 'bold 11px -apple-system, sans-serif';
+  ctx.textAlign = 'left';
+  var valText = (lastPnl >= 0 ? '+' : '') + Math.round(lastPnl).toLocaleString();
+  if (endX + ctx.measureText(valText).width + 8 > W - padR) {
+    ctx.textAlign = 'right';
+    ctx.fillText(valText, endX - 8, endY - 8);
+  } else {
+    ctx.fillText(valText, endX + 8, endY - 8);
+  }
+}
+
+// Chart hover tooltip
+(function() {
+  var canvas = document.getElementById('pnl-chart');
+  var tooltip = document.getElementById('chart-tooltip');
+
+  canvas.addEventListener('mousemove', function(e) {
+    if (!_chartDots.length) { tooltip.style.display = 'none'; return; }
+    var rect = canvas.getBoundingClientRect();
+    var mx = e.clientX - rect.left;
+    var my = e.clientY - rect.top;
+
+    // Find nearest dot within 15px
+    var best = null, bestDist = 225; // 15^2
+    for (var i = 0; i < _chartDots.length; i++) {
+      var d = _chartDots[i];
+      var dist = (mx - d.x) * (mx - d.x) + (my - d.y) * (my - d.y);
+      if (dist < bestDist) { bestDist = dist; best = d; }
+    }
+
+    if (!best) { tooltip.style.display = 'none'; return; }
+
+    var sign = best.tradePnl >= 0 ? '+' : '';
+    var cumSign = best.pnl >= 0 ? '+' : '';
+    var html = '<div style="font-weight:600;">' + (best.time || '-') + '</div>';
+    if (best.symbol) html += '<div style="color:#aaa;font-size:11px;">' + best.symbol + '</div>';
+    html += '<div>Trade: <span style="color:' + (best.tradePnl >= 0 ? '#6fcf97' : '#ff6b6b') + '">' + sign + best.tradePnl.toFixed(2) + '</span></div>';
+    html += '<div>Total: <span style="color:' + (best.pnl >= 0 ? '#6fcf97' : '#ff6b6b') + '">' + cumSign + best.pnl.toFixed(2) + '</span></div>';
+    tooltip.innerHTML = html;
+    tooltip.style.display = 'block';
+
+    // Position tooltip near cursor, keep within card
+    var cardRect = canvas.parentElement.getBoundingClientRect();
+    var tx = e.clientX - cardRect.left + 12;
+    var ty = e.clientY - cardRect.top - 10;
+    if (tx + tooltip.offsetWidth > cardRect.width - 8) tx = tx - tooltip.offsetWidth - 24;
+    if (ty < 0) ty = 0;
+    tooltip.style.left = tx + 'px';
+    tooltip.style.top = ty + 'px';
+  });
+
+  canvas.addEventListener('mouseleave', function() {
+    tooltip.style.display = 'none';
+  });
+})();
+
 setInterval(refresh, 5000);
 refresh();
 </script>
@@ -690,10 +1069,16 @@ def api_settings():
         data["sl_points"] = float(data["sl_points"])
     if "target_points" in data:
         data["target_points"] = float(data["target_points"])
-    if "target_premium" in data:
-        data["target_premium"] = float(data["target_premium"])
     if "quantity" in data:
         data["quantity"] = int(data["quantity"])
+    if "min_premium" in data:
+        data["min_premium"] = float(data["min_premium"])
+    if "daily_profit_pct" in data:
+        data["daily_profit_pct"] = float(data["daily_profit_pct"])
+    if "daily_loss_pct" in data:
+        data["daily_loss_pct"] = float(data["daily_loss_pct"])
+    if "daily_cutoff" in data:
+        data["daily_cutoff"] = bool(data["daily_cutoff"])
 
     _engine.update_settings(**data)
     return jsonify({"ok": True})
