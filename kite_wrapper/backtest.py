@@ -531,6 +531,9 @@ class BacktestEngine:
             trades = self._simulate_signal_candle_sl(
                 strategy, settings, ce_inst, ce_candles, pe_inst, pe_candles,
                 date_str=date_str, cutoff=cutoff,
+                instruments=instruments, min_premium=min_premium,
+                start_time=start_time, stop_time=stop_time,
+                expiry_type=expiry_type,
             )
         else:
             trades = self._simulate_signal_based(
@@ -710,7 +713,10 @@ class BacktestEngine:
 
     def _simulate_signal_candle_sl(self, strategy, settings,
                                    ce_inst, ce_candles, pe_inst, pe_candles,
-                                   date_str="", cutoff=None):
+                                   date_str="", cutoff=None,
+                                   instruments=None, min_premium=0,
+                                   start_time="09:15", stop_time="15:25",
+                                   expiry_type="weekly"):
         """Signal-based simulation with candle-close SL: exit at N-min close
         when (high_since_entry - close) > sl_points. No exchange SL, no trailing."""
         trades = []
@@ -724,6 +730,10 @@ class BacktestEngine:
                 continue
             warmup = self._fetch_prev_day_candles(inst, date_str) if date_str else []
             signal_data = strategy.precompute_signal_data(candles, warmup or None)
+            # Inject settings into signal_data for strategies that need them
+            if signal_data is not None:
+                signal_data["_target_points"] = settings.target_points
+                signal_data["_sl_points"] = settings.sl_points
             slots[opt] = {
                 "inst": inst,
                 "candles": candles,
@@ -781,15 +791,44 @@ class BacktestEngine:
                     is_bar_close = (cdt.minute % bar_min == bar_min - 1) or is_last_time
 
                     if is_bar_close:
-                        close = candle["close"]
-                        drop = s["high_since_entry"] - close
+                        # Use previous candle's low if strategy requires it
+                        use_prev_low = getattr(strategy, 'candle_sl_use_prev_low', False)
+                        if use_prev_low:
+                            check_price = candle["low"]
+                        else:
+                            check_price = candle["close"]
 
-                        if drop > settings.sl_points and not is_last_time:
-                            # Candle SL hit — exit
+                        drop = s["high_since_entry"] - check_price
+
+                        # Check supertrend conditions for strategies that use it
+                        force_exit = False
+                        skip_sl_exit = False
+                        sd = s.get("signal_data")
+                        if sd and "supertrend" in sd and "per_minute_bar" in sd:
+                            bi = sd["per_minute_bar"][ci]
+                            st_val = sd["supertrend"][bi]
+                            if st_val is not None:
+                                # Force exit if close < supertrend
+                                if candle["close"] < st_val:
+                                    force_exit = True
+                                # Skip SL exit if low is near supertrend support
+                                elif drop > settings.sl_points:
+                                    low_to_st = candle["low"] - st_val
+                                    target_pts = sd.get("_target_points", settings.target_points)
+                                    if low_to_st <= target_pts and candle["close"] > st_val:
+                                        skip_sl_exit = True
+
+                        sl_triggered = drop > settings.sl_points and not skip_sl_exit
+                        if (sl_triggered or force_exit) and not is_last_time:
+                            # Candle SL hit — exit at current close
+                            exit_price = candle["close"]
                             trades.append(self._record_trade(
-                                position, close, time_str,
+                                position, exit_price, time_str,
                                 symbol, lot_size, position["remaining_lots"], "SL",
                             ))
+                            # If losing trade, let strategy disable this option
+                            if exit_price < position["entry_price"] and s.get("signal_data"):
+                                s["signal_data"]["_disabled"] = True
                             s["position"] = None
                             s["waiting"] = True
                             s["high_since_entry"] = 0.0
@@ -810,6 +849,45 @@ class BacktestEngine:
                     # No position: check strategy signal for entry
                     if is_last_time or cutoff_reached:
                         continue
+
+                    # Reselect if price deviated >20% from min_premium
+                    if min_premium > 0 and instruments is not None:
+                        close_now = candle["close"]
+                        deviation = abs(close_now - min_premium) / min_premium
+                        reselect_key = f"_reselect_check_{opt}"
+                        cdt = candle["date"]
+                        is_bar = (cdt.minute % bar_min == bar_min - 1)
+                        if deviation > 0.20 and is_bar and s.get("_last_reselect") != time_str:
+                            s["_last_reselect"] = time_str
+                            # Get NIFTY spot at this time for ATM calculation
+                            nifty_candles = self._fetch_nifty_minute_candles(date_str)
+                            spot = self._get_spot_at_time(nifty_candles, cdt) if nifty_candles else None
+                            new_inst, new_candles, err = self._auto_select_instrument(
+                                instruments, opt, date_str, min_premium,
+                                start_time, stop_time,
+                                check_time=cdt, spot_override=spot,
+                                expiry_type=expiry_type,
+                            )
+                            if new_inst and new_candles and new_inst["tradingsymbol"] != s["symbol"]:
+                                warmup = self._fetch_prev_day_candles(new_inst, date_str) if date_str else []
+                                new_signal_data = strategy.precompute_signal_data(new_candles, warmup or None)
+                                if new_signal_data is not None:
+                                    new_signal_data["_target_points"] = settings.target_points
+                                    new_signal_data["_sl_points"] = settings.sl_points
+                                s["inst"] = new_inst
+                                s["candles"] = new_candles
+                                s["signal_data"] = new_signal_data
+                                s["symbol"] = new_inst["tradingsymbol"]
+                                s["lot_size"] = int(new_inst.get("lot_size", 1))
+                                # Rebuild time map
+                                new_time_map = {}
+                                for ni, nc in enumerate(new_candles):
+                                    ncdt = nc["date"]
+                                    if ncdt.tzinfo is None:
+                                        ncdt = IST.localize(ncdt)
+                                    new_time_map[ncdt] = ni
+                                s["time_map"] = new_time_map
+                                continue
 
                     should_enter = strategy.check_entry_signal_backtest(
                         s["candles"], s["signal_data"], ci, s["waiting"],

@@ -964,7 +964,11 @@ class StrategyEngine:
         Uses 1-min candles for both high and close to match backtest exactly."""
         now = datetime.now(IST)
         bar_min = getattr(self._strategy, 'candle_sl_minutes', 5)
-        if now.minute % bar_min != 0:
+        check_offset = getattr(self._strategy, 'candle_check_offset', 0)
+        delay_secs = getattr(self._strategy, 'candle_check_delay_seconds', 0)
+        if now.minute % bar_min != check_offset:
+            return
+        if delay_secs > 0 and now.second < delay_secs:
             return
         check_key = f"{now.hour}:{now.minute}"
         if self.state.strategy_data.get("_candle_exit_check_slots") == check_key:
@@ -983,12 +987,20 @@ class StrategyEngine:
                 symbol = slot.trading_symbol
                 remaining_lots = pos.remaining_lots if pos.remaining_lots > 0 else self.state.settings.quantity
 
-            # Fetch 1-min candles for high and close
+            # Fetch candles for SL check
+            use_prev_low = getattr(self._strategy, 'candle_sl_use_prev_low', False)
             try:
                 today = now.date()
-                candles = self.client.kite.historical_data(
-                    token, today, today, "minute"
-                )
+                if use_prev_low:
+                    # Use 5-min candles (available due to +1 min offset)
+                    candles = self.client.kite.historical_data(
+                        token, today, today, "5minute"
+                    )
+                else:
+                    # Use 1-min candles for other strategies
+                    candles = self.client.kite.historical_data(
+                        token, today, today, "minute"
+                    )
             except Exception as e:
                 logger.error(f"[{opt}] Candle exit check — failed to fetch candles: {e}")
                 continue
@@ -1003,17 +1015,44 @@ class StrategyEngine:
                 if c_time > entry_time:
                     high_since_entry = max(high_since_entry, c["high"])
 
-            bar_close = candles[-1]["close"]
-            drop = high_since_entry - bar_close
+            if use_prev_low and len(candles) >= 1:
+                check_price = candles[-1]["low"]
+                price_label = "last_5m_low"
+            else:
+                check_price = candles[-1]["close"]
+                price_label = "bar_close"
+
+            drop = high_since_entry - check_price
 
             logger.info(
                 f"[{opt}] Candle exit check: high={high_since_entry:.2f}, "
-                f"bar_close={bar_close:.2f}, drop={drop:.2f}, sl={sl_pts}"
+                f"{price_label}={check_price:.2f}, drop={drop:.2f}, sl={sl_pts}"
             )
 
-            if drop > sl_pts:
+            should_exit = drop > sl_pts
+            exit_reason = f"drop {drop:.2f} > {sl_pts}"
+
+            # Let strategy skip the SL exit (e.g. dip near supertrend support)
+            if should_exit and hasattr(self._strategy, 'should_skip_exit'):
+                skip, reason = self._strategy.should_skip_exit(
+                    self.client, opt, self.state.strategy_data
+                )
+                if skip:
+                    logger.info(f"[{opt}] SL drop triggered but skipped: {reason}")
+                    should_exit = False
+
+            # Check strategy-specific force exit (e.g. close below supertrend)
+            if not should_exit and hasattr(self._strategy, 'should_force_exit'):
+                force, reason = self._strategy.should_force_exit(
+                    self.client, opt, self.state.strategy_data
+                )
+                if force:
+                    should_exit = True
+                    exit_reason = reason
+
+            if should_exit:
                 logger.info(
-                    f"[{opt}] Candle SL triggered: drop {drop:.2f} > {sl_pts}, "
+                    f"[{opt}] Candle SL triggered: {exit_reason}, "
                     f"exiting at market"
                 )
                 qty = remaining_lots * slot.lot_size
@@ -1817,6 +1856,12 @@ class StrategyEngine:
         if signals:
             for sig in signals:
                 opt = sig["option_type"]
+                # Handle reselect signal — pick a new instrument for this slot
+                if sig.get("action") == "reselect":
+                    slot = self.state.position_slots.get(opt)
+                    if slot and not slot.active_position:
+                        self._reselect_slot(opt)
+                    continue
                 slot = self.state.position_slots.get(opt)
                 if slot and not slot.active_position:
                     self._enter_position_slot(opt, sig["direction"])
@@ -1831,6 +1876,46 @@ class StrategyEngine:
             parts.append("Waiting for signal")
         with self._lock:
             self.state.status_message = " | ".join(parts)
+
+    def _reselect_slot(self, opt_type: str):
+        """Reselect instrument for a specific CE/PE slot when price has deviated."""
+        from .base_strategy import select_nifty_option
+
+        min_prem = self.state.settings.min_premium
+        exp_type = self.state.settings.expiry_type
+
+        new_inst = select_nifty_option(self.client, opt_type, min_prem, exp_type)
+        if not new_inst:
+            logger.error(f"[{opt_type}] Reselection failed")
+            return
+
+        new_token = new_inst["instrument_token"]
+        new_symbol = new_inst["tradingsymbol"]
+        new_lot = int(new_inst.get("lot_size", 1))
+
+        old_symbol = self.state.strategy_data.get(f"_{opt_type.lower()}_symbol", "")
+        if new_symbol == old_symbol:
+            return  # same instrument, no change needed
+
+        logger.info(f"[{opt_type}] Reselecting: {old_symbol} → {new_symbol}")
+
+        with self._lock:
+            self.state.strategy_data[f"_{opt_type.lower()}_token"] = new_token
+            self.state.strategy_data[f"_{opt_type.lower()}_symbol"] = new_symbol
+            self.state.strategy_data[f"_{opt_type.lower()}_lot_size"] = new_lot
+            # Reset rolling high for this option
+            self.state.strategy_data[f"_rolling_high_{opt_type}"] = 0.0
+
+            self.state.position_slots[opt_type] = PositionSlot(
+                option_type=opt_type,
+                instrument_token=new_token,
+                trading_symbol=new_symbol,
+                lot_size=new_lot,
+            )
+            self._save_state()
+
+        # Resubscribe ticker to include new token
+        self._start_dual_ticker()
 
     def _preselect_both_options(self):
         """Select CE and PE instruments, store in strategy_data and position_slots."""

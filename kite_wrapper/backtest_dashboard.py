@@ -178,6 +178,8 @@ BACKTEST_HTML = """
           <option value="buy_ce_pe_alternate_candle_close">Buy CE/PE Alternate (Candle Close)</option>
           <option value="buy_ce_pe_scale_out_candle_close">Buy CE/PE Scale Out (Candle Close)</option>
           <option value="supertrend_candle_close">Buy CE/PE Supertrend (Candle Close)</option>
+          <option value="buy_dip_candle_close">Buy Dip CE/PE (Candle Close)</option>
+          <option value="buy_supertrend_dip_candle_close">Buy Supertrend Dip CE/PE (Candle Close)</option>
         </select>
       </div>
       <div class="form-group">
@@ -250,6 +252,8 @@ BACKTEST_HTML = """
       <label><input type="checkbox" value="buy_ce_pe_alternate_candle_close" checked> Buy CE/PE Alternate (Candle Close)</label>
       <label><input type="checkbox" value="buy_ce_pe_scale_out_candle_close" checked> Buy CE/PE Scale Out (Candle Close)</label>
       <label><input type="checkbox" value="supertrend_candle_close" checked> Supertrend (Candle Close)</label>
+      <label><input type="checkbox" value="buy_dip_candle_close" checked> Buy Dip CE/PE (Candle Close)</label>
+      <label><input type="checkbox" value="buy_supertrend_dip_candle_close" checked> Supertrend Dip CE/PE (Candle Close)</label>
     </div>
   </div>
 
@@ -452,7 +456,7 @@ function loadCachedSummary() {
     .catch(function() {});
 }
 
-var LOT_MULTIPLIERS = {sar: 1, buy_ce_pe_alternate_candle_close: 1, buy_ce_pe_scale_out_candle_close: 3, supertrend_candle_close: 1};
+var LOT_MULTIPLIERS = {sar: 1, buy_ce_pe_alternate_candle_close: 1, buy_ce_pe_scale_out_candle_close: 3, supertrend_candle_close: 1, buy_dip_candle_close: 1, buy_supertrend_dip_candle_close: 1};
 var NIFTY_LOT_SIZE = 75;
 
 // Default backtest fields from live dashboard settings
@@ -694,8 +698,7 @@ function runCompareAll() {
 
   // Derive month from selected date
   var selDate = document.getElementById('f-date').value;
-  var monthLabel = selDate.slice(0, 7);  // "2026-02"
-  statusMsg.textContent = 'Running all strategies for ' + monthLabel + '...';
+  statusMsg.textContent = 'Running all strategies from ' + selDate + ' to today...';
 
   var payload = {
     date: selDate,
@@ -1023,7 +1026,7 @@ def _run_all_worker(job_id, data):
     _, last_day = monthrange(sel_year, sel_month)
     today = _date.today()
     weekdays = []
-    for day_num in range(1, last_day + 1):
+    for day_num in range(sel.day, last_day + 1):
         dt = _date(sel_year, sel_month, day_num)
         if dt > today:
             break
